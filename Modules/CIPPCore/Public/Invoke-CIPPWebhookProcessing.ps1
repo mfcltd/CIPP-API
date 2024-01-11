@@ -12,6 +12,9 @@ function Invoke-CippWebhookProcessing {
     $ConfigTable = get-cipptable -TableName 'SchedulerConfig'
     $LocationTable = Get-CIPPTable -TableName 'knownlocationdb'
     $Alertconfig = Get-CIPPAzDataTableEntity @ConfigTable -Filter "Tenant eq '$tenantfilter'"
+    if (!$Alertconfig) {
+        $Alertconfig = Get-CIPPAzDataTableEntity @ConfigTable -Filter "Tenant eq 'AllTenants'"
+    }
 
     if ($data.userId -eq 'Not Available') { $data.userId = $data.userKey }
     if ($data.Userkey -eq 'Not Available') { $data.Userkey = $data.userId }
@@ -21,7 +24,7 @@ function Invoke-CippWebhookProcessing {
         #If we have a location, we use that. If not, we perform a lookup in the GeoIP database.
         if ($Location) {
             Write-Host 'Using known location'
-            $Country = $Location.CountryCode
+            $Country = $Location.CountryOrRegion
             $City = $Location.City
             $Proxy = $Location.Proxy
             $hosting = $Location.Hosting
@@ -32,11 +35,11 @@ function Invoke-CippWebhookProcessing {
                 $data.clientip = $data.clientip -replace ':\d+$', '' # Remove the port number if present
             }
             $Location = Get-CIPPGeoIPLocation -IP $data.clientip
-            $Country = if ($Location.countryCode) { $Location.CountryCode } else { 'Unknown' }
-            $City = if ($Location.city) { $Location.cityName } else { 'Unknown' }
-            $Proxy = if ($Location.proxy) { $Location.proxy } else { 'Unknown' }
-            $hosting = if ($Location.hosting) { $Location.hosting } else { 'Unknown' }
-            $ASName = if ($Location.asName) { $Location.asName } else { 'Unknown' }
+            $Country = if ($Location.CountryCode) { $Location.CountryCode } else { 'Unknown' }
+            $City = if ($Location.City) { $Location.City } else { 'Unknown' }
+            $Proxy = if ($Location.Proxy -ne $null) { $Location.Proxy } else { 'Unknown' }
+            $hosting = if ($Location.Hosting -ne $null) { $Location.Hosting } else { 'Unknown' }
+            $ASName = if ($Location.ASName) { $Location.ASName } else { 'Unknown' }
         }
     }
     $TableObj = [PSCustomObject]::new()
@@ -54,13 +57,16 @@ function Invoke-CippWebhookProcessing {
         return ''
     }
 
-    $AllowedLocations = ($Alertconfig.if | ConvertFrom-Json).AllowedLocations.value
-    Write-Host "These are the allowed locations: $($AllowedLocations -join ',')"
+    $AllowedLocations = ($Alertconfig.if | ConvertFrom-Json).allowedcountries.value
+    Write-Host "These are the allowed locations: $($AllowedLocations)"
     Write-Host "Operation: $($data.operation)"
     switch ($data.operation) {
         { 'UserLoggedIn' -eq $data.operation -and $proxy -eq $true } { $data.operation = 'BadRepIP' }
         { 'UserLoggedIn' -eq $data.operation -and $hosting -eq $true } { $data.operation = 'HostedIP' }
-        { 'UserLoggedIn' -eq $data.operation -and $Country -notin $AllowedLocations -and $data.ResultStatus -eq 'Success' -and $TableObj.ResultStatusDetail -eq 'Success' } { $data.operation = 'UserLoggedInFromUnknownLocation' }
+        { 'UserLoggedIn' -eq $data.operation -and $Country -notin $AllowedLocations -and $data.ResultStatus -eq 'Success' -and $TableObj.ResultStatusDetail -eq 'Success' } {
+            Write-Host "$($country) is not in $($AllowedLocations)"
+            $data.operation = 'UserLoggedInFromUnknownLocation' 
+        }
         { 'UserloggedIn' -eq $data.operation -and $data.UserType -eq 2 -and $data.ResultStatus -eq 'Success' -and $TableObj.ResultStatusDetail -eq 'Success' } { $data.operation = 'AdminLoggedIn' }
         default { break }
     }
@@ -69,7 +75,7 @@ function Invoke-CippWebhookProcessing {
     foreach ($AlertSetting in $Alertconfig) {
         $ifs = $AlertSetting.If | ConvertFrom-Json
         $Dos = $AlertSetting.execution | ConvertFrom-Json
-        if ($data.operation -notin $Ifs.selection -and $ifs.selection -ne 'AnyAlert' ) {
+        if ($data.operation -notin $Ifs.selection -and $ifs.selection -ne 'AnyAlert' -and ($ifs.count -le 1 -and $ifs.selection -ne 'customField')) {
             Write-Host 'Not an operation to do anything for. storing IP info'
             if ($data.ClientIP -and $data.operation -like '*LoggedIn*') {
                 Write-Host 'Add IP and potential location to knownlocation db for this specific user.'
@@ -86,6 +92,15 @@ function Invoke-CippWebhookProcessing {
                     Proxy           = "$Proxy"
                     Hosting         = "$hosting"
                     ASName          = "$ASName"
+                    Region          = "$($location.region)"
+                    RegionName      = "$($location.regionName)"
+                    org             = "$($location.org)"
+                    zip             = "$($location.zip)"
+                    mobile          = "$($location.mobile)"
+                    lat             = "$($location.lat)"
+                    lon             = "$($location.lon)"
+                    isp             = "$($location.isp)"
+                    Country         = "$($location.country)"
                 }
                 $null = Add-CIPPAzDataTableEntity @LocationTable -Entity $LocationInfo -Force
             }
